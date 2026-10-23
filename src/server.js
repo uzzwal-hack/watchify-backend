@@ -5,8 +5,10 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
-// THIS IS CRITICAL FOR RENDER TO WORK
+
+// CRITICAL: Trust Render's proxy so express-rate-limit works
 app.set('trust proxy', 1); 
+
 app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
