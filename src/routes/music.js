@@ -10,49 +10,72 @@ const KEYS = [
     process.env.KLYPHIC_KEY_3
 ].filter(Boolean);
 
-let idx = 0;
-const nextKey = () => (KEYS.length ? KEYS[idx++ % KEYS.length] : '');
+// Helper: Tries Key 1, then Key 2, then Key 3
+async function fetchWithFallback(endpoint, params) {
+    let lastError = null;
+    
+    for (let i = 0; i < KEYS.length; i++) {
+        try {
+            const token = KEYS[i];
+            const { data } = await axios.get(`${KLYPHIC}${endpoint}`, {
+                params: { ...params, token },
+                timeout: 20000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Accept': 'application/json, audio/mpeg, */*'
+                }
+            });
+            // If successful, return data immediately and stop trying other keys
+            return data; 
+        } catch (error) {
+            lastError = error;
+            const status = error.response?.status;
+            console.log(`Key ${i + 1} failed with status ${status}. Trying next key...`);
+            
+            // If it's a 401 (Unauthorized) or 429 (Rate Limit), continue to next key.
+            // If it's a 500 (Server Error), we still try the next key just in case.
+            if (i === KEYS.length - 1) {
+                console.error("All API keys exhausted.");
+            }
+        }
+    }
+    throw lastError || new Error("All API keys failed");
+}
 
-// 1. SEARCH: Spotify for metadata -> SoundCloud as fallback
+// 1. SEARCH: Try Spotify -> Fallback to SoundCloud
 router.get('/search', requireAuth, async (req, res) => {
     const { query, limit = 15 } = req.query;
     if (!query) return res.status(400).json({ error: 'query required' });
     
     try {
         console.log("Searching Spotify for:", query);
-        const { data } = await axios.get(`${KLYPHIC}/search/spotify`, {
-            params: { token: nextKey(), query, limit: Math.min(Number(limit), 20) },
-            timeout: 15000,
-        });
-
-        let tracks = data.results || data.data?.tracks || [];
+        let data = null;
         
-        if (tracks.length === 0) {
-            console.log("Spotify returned 0 results, falling back to SoundCloud");
-            const scData = await axios.get(`${KLYPHIC}/music/soundcloud`, {
-                params: { token: nextKey(), query, limit: Math.min(Number(limit), 20) },
-                timeout: 15000,
-            });
-            tracks = scData.data?.tracks || scData.results || scData.tracks || [];
+        try {
+            data = await fetchWithFallback('/search/spotify', { query, limit });
+        } catch (e) {
+            console.log("Spotify failed, falling back to SoundCloud");
+            data = await fetchWithFallback('/music/soundcloud', { query, limit });
         }
 
+        let tracks = data.results || data.data?.tracks || data.tracks || [];
+        
         const formatted = tracks.map(t => ({
             id: t.id || Math.random(),
             title: t.title || t.name,
             artist: t.artist || t.artists?.[0]?.name || "Unknown Artist",
             thumbnail: t.thumbnail || t.album?.images?.[0]?.url || t.artwork_url,
-            permalink_url: t.permalink_url || t.external_urls?.spotify || t.url,
+            permalink_url: `ytsearch:${t.title} ${t.artist || ''} audio`,
             duration: t.duration || t.duration_ms || 0
         }));
 
         res.json({ ok: true, results: formatted });
     } catch (e) {
-        const status = e.response?.status;
-        res.status(status || 502).json({ error: 'search failed', detail: e.message });
+        res.status(502).json({ error: 'search failed', detail: e.message });
     }
 });
 
-// 2. STREAM: YouTube primary -> SoundCloud fallback
+// 2. STREAM: Resolve YouTube URL using the fallback logic
 router.get('/stream', async (req, res) => {
     const { url, json } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
@@ -60,24 +83,22 @@ router.get('/stream', async (req, res) => {
     try {
         console.log("Resolving stream for:", url);
         let audioUrl = null;
+        let data = null;
 
-        if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const ytData = await axios.get(`${KLYPHIC}/downloader/yt`, {
-                params: { token: nextKey(), url, format: 'mp3' },
-                timeout: 30000,
+        if (url.startsWith('ytsearch:') || url.includes('youtube.com') || url.includes('youtu.be')) {
+            const searchQuery = url.startsWith('ytsearch:') ? url.replace('ytsearch:', '') : url;
+            
+            // Use the fallback logic for YouTube
+            data = await fetchWithFallback('/downloader/yt', { 
+                query: url.startsWith('ytsearch:') ? searchQuery : undefined,
+                url: url.startsWith('ytsearch:') ? undefined : searchQuery,
+                format: 'mp3' 
             });
-            audioUrl = ytData.data.download_url || ytData.data.data?.download_url || ytData.data.url;
+            audioUrl = data.download_url || data.data?.download_url || data.url;
         } else {
-            const scData = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
-                params: { token: nextKey(), url },
-                timeout: 30000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Accept': 'audio/mpeg,audio/*,*/*',
-                    'Referer': 'https://soundcloud.com/'
-                }
-            });
-            audioUrl = scData.data.download_url || scData.data.data?.download_url || scData.data.url;
+            // Use the fallback logic for SoundCloud
+            data = await fetchWithFallback('/music/soundclouddl', { url });
+            audioUrl = data.download_url || data.data?.download_url || data.url;
         }
 
         if (!audioUrl) {
