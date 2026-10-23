@@ -24,28 +24,33 @@ router.get('/search', requireAuth, async (req, res) => {
     }
 });
 
-// THE FIX: Use the download endpoint and pipe the raw MP3 stream
+// THE FIX: Spoof headers so Klyphic doesn't block the download request
 router.get('/stream', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
     
     try {
-        console.log("Piping raw MP3 stream for:", url);
+        console.log("Requesting stream with spoofed headers for:", url);
         
         const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
             params: { token: nextKey(), url },
             responseType: 'stream',
             timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'audio/mpeg,audio/*,*/*',
+                'Referer': 'https://soundcloud.com/'
+            }
         });
+
+        // If Klyphic returns an error, handle it instead of crashing the app
+        if (upstream.status !== 200) {
+            return res.status(upstream.status).json({ error: 'Failed to fetch audio from Klyphic' });
+        }
 
         res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Accept-Ranges', 'bytes'); // Helps ExoPlayer with buffering
+        res.setHeader('Accept-Ranges', 'bytes');
         
-        upstream.data.on('error', (err) => {
-            console.error("Upstream stream error:", err);
-            res.end();
-        });
-
         upstream.data.pipe(res);
 
     } catch (e) { 
