@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -24,47 +25,34 @@ router.get('/search', requireAuth, async (req, res) => {
     }
 });
 
-// We use soundcloudstream here to get a direct MP3 link
+// THE FIX: Use the download endpoint and pipe the raw MP3 stream
 router.get('/stream', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
     
     try {
-        console.log("Requesting direct stream URL for:", url);
+        console.log("Piping raw MP3 stream for:", url);
         
-        const { data } = await axios.get(`${KLYPHIC}/music/soundcloudstream`, {
-            params: { token: nextKey(), url, format: 'mp3' },
+        const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
+            params: { token: nextKey(), url },
+            responseType: 'stream',
             timeout: 30000,
         });
 
-        // Extract the direct MP3 link from Klyphic's response
-        const audioUrl = data.audio_url || data.data?.audio_url || data.stream_url || data.data?.stream_url;
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Accept-Ranges', 'bytes'); // Helps ExoPlayer with buffering
+        
+        upstream.data.on('error', (err) => {
+            console.error("Upstream stream error:", err);
+            res.end();
+        });
 
-        if (!audioUrl) {
-            console.log("Failed to find audio URL:", JSON.stringify(data).substring(0, 300));
-            return res.status(404).json({ error: "No audio URL found" });
-        }
-
-        // Redirect ExoPlayer directly to the MP3 file on SoundCloud's servers
-        res.redirect(audioUrl);
+        upstream.data.pipe(res);
 
     } catch (e) { 
         console.error("STREAM ERROR:", e.message);
         res.status(502).json({ error: 'stream failed', detail: e.message }); 
     }
-});
-
-router.get('/download', requireAuth, async (req, res) => {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'url required' });
-    try {
-        const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
-            params: { token: nextKey(), url },
-            responseType: 'stream', timeout: 60000,
-        });
-        res.setHeader('Content-Type', 'audio/mpeg');
-        upstream.data.pipe(res);
-    } catch (e) { res.status(502).json({ error: 'download failed', detail: e.message }); }
 });
 
 module.exports = router;
