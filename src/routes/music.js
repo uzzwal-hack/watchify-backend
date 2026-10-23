@@ -4,55 +4,90 @@ const axios = require('axios');
 const { requireAuth } = require('../lib/authGuard');
 
 const KLYPHIC = 'https://apis.klyphic.in';
-const KEYS = [process.env.KLYPHIC_KEY_1, process.env.KLYPHIC_KEY_2, process.env.KLYPHIC_KEY_3].filter(Boolean);
+const KEYS = [
+    process.env.KLYPHIC_KEY_1,
+    process.env.KLYPHIC_KEY_2,
+    process.env.KLYPHIC_KEY_3
+].filter(Boolean);
+
 let idx = 0;
 const nextKey = () => (KEYS.length ? KEYS[idx++ % KEYS.length] : '');
 
+// 1. SEARCH: Spotify for metadata -> SoundCloud as fallback
 router.get('/search', requireAuth, async (req, res) => {
-    const { query, limit = 10 } = req.query;
+    const { query, limit = 15 } = req.query;
     if (!query) return res.status(400).json({ error: 'query required' });
+    
     try {
-        const { data } = await axios.get(`${KLYPHIC}/music/soundcloud`, {
+        console.log("Searching Spotify for:", query);
+        const { data } = await axios.get(`${KLYPHIC}/search/spotify`, {
             params: { token: nextKey(), query, limit: Math.min(Number(limit), 20) },
             timeout: 15000,
         });
-        const tracks = data.data?.tracks || data.results || data.tracks || (Array.isArray(data.data) ? data.data : []);
-        res.json({ ok: true, results: tracks });
+
+        let tracks = data.results || data.data?.tracks || [];
+        
+        if (tracks.length === 0) {
+            console.log("Spotify returned 0 results, falling back to SoundCloud");
+            const scData = await axios.get(`${KLYPHIC}/music/soundcloud`, {
+                params: { token: nextKey(), query, limit: Math.min(Number(limit), 20) },
+                timeout: 15000,
+            });
+            tracks = scData.data?.tracks || scData.results || scData.tracks || [];
+        }
+
+        const formatted = tracks.map(t => ({
+            id: t.id || Math.random(),
+            title: t.title || t.name,
+            artist: t.artist || t.artists?.[0]?.name || "Unknown Artist",
+            thumbnail: t.thumbnail || t.album?.images?.[0]?.url || t.artwork_url,
+            permalink_url: t.permalink_url || t.external_urls?.spotify || t.url,
+            duration: t.duration || t.duration_ms || 0
+        }));
+
+        res.json({ ok: true, results: formatted });
     } catch (e) {
         const status = e.response?.status;
         res.status(status || 502).json({ error: 'search failed', detail: e.message });
     }
 });
 
-// THE FIX: Spoof headers and pipe the correct audio stream
+// 2. STREAM: YouTube primary -> SoundCloud fallback
 router.get('/stream', async (req, res) => {
-    const { url } = req.query;
+    const { url, json } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
-    
-    try {
-        console.log("Piping stream with browser headers for:", url);
-        
-        const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
-            params: { token: nextKey(), url },
-            responseType: 'stream',
-            timeout: 30000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'audio/mpeg,audio/*,*/*',
-                'Referer': 'https://soundcloud.com/'
-            }
-        });
 
-        // If Klyphic rejects it, send an error instead of piping HTML to ExoPlayer
-        if (upstream.status !== 200) {
-            return res.status(upstream.status).json({ error: 'Failed to fetch audio' });
+    try {
+        console.log("Resolving stream for:", url);
+        let audioUrl = null;
+
+        if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            const ytData = await axios.get(`${KLYPHIC}/downloader/yt`, {
+                params: { token: nextKey(), url, format: 'mp3' },
+                timeout: 30000,
+            });
+            audioUrl = ytData.data.download_url || ytData.data.data?.download_url || ytData.data.url;
+        } else {
+            const scData = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
+                params: { token: nextKey(), url },
+                timeout: 30000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Accept': 'audio/mpeg,audio/*,*/*',
+                    'Referer': 'https://soundcloud.com/'
+                }
+            });
+            audioUrl = scData.data.download_url || scData.data.data?.download_url || scData.data.url;
         }
 
-        // Set the exact headers ExoPlayer needs to recognize the MP3
-        res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Accept-Ranges', 'bytes');
-        
-        upstream.data.pipe(res);
+        if (!audioUrl) {
+            return res.status(404).json({ error: "No playable stream found" });
+        }
+
+        if (json === 'true' || req.headers.accept?.includes('application/json')) {
+            return res.json({ ok: true, stream_url: audioUrl });
+        }
+        return res.redirect(audioUrl);
 
     } catch (e) { 
         console.error("STREAM ERROR:", e.message);
