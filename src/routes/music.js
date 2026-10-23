@@ -32,16 +32,29 @@ router.get('/search', requireAuth, async (req, res) => {
     }
 });
 
-router.get('/stream', requireAuth, async (req, res) => {
-    const { url, limit = 5 } = req.query;
+// NOTE: requireAuth is intentionally removed here so ExoPlayer can stream it directly
+router.get('/stream', async (req, res) => {
+    const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
+    
     try {
-        const { data } = await axios.get(`${KLYPHIC}/music/soundcloudstream`, {
-            params: { token: nextKey(), url, limit, format: 'mp3' },
+        console.log("Downloading stream for:", url);
+        
+        // We ask Klyphic to download the track
+        const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
+            params: { token: nextKey(), url },
+            responseType: 'stream',
             timeout: 30000,
         });
-        res.json({ ok: true, data });
-    } catch (e) { res.status(502).json({ error: 'stream failed', detail: e.message }); }
+
+        // We pipe the audio directly to the Android app
+        res.setHeader('Content-Type', 'audio/mpeg');
+        upstream.data.pipe(res);
+
+    } catch (e) { 
+        console.error("STREAM ERROR:", e.message);
+        res.status(502).json({ error: 'stream failed', detail: e.message }); 
+    }
 });
 
 router.get('/download', requireAuth, async (req, res) => {
