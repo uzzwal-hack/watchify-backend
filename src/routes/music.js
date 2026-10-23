@@ -16,40 +16,37 @@ router.get('/search', requireAuth, async (req, res) => {
             params: { token: nextKey(), query, limit: Math.min(Number(limit), 20) },
             timeout: 15000,
         });
-        console.log("KLYPHIC RAW:", JSON.stringify(data).substring(0, 300));
-        console.log('[klyphic/search] status=200 shape=', JSON.stringify(data).slice(0, 2000));
         const tracks = data.data?.tracks || data.results || data.tracks || (Array.isArray(data.data) ? data.data : []);
         res.json({ ok: true, results: tracks });
     } catch (e) {
         const status = e.response?.status;
-        const body = e.response?.data;
-        console.error('[klyphic/search] FAILED status=', status, 'body=', JSON.stringify(body).slice(0, 500));
-        res.status(status || 502).json({
-            error: 'search failed',
-            status,
-            detail: e.message,
-        });
+        res.status(status || 502).json({ error: 'search failed', detail: e.message });
     }
 });
 
-// NOTE: requireAuth is intentionally removed here so ExoPlayer can stream it directly
+// We use soundcloudstream here to get a direct MP3 link
 router.get('/stream', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'url required' });
     
     try {
-        console.log("Downloading stream for:", url);
+        console.log("Requesting direct stream URL for:", url);
         
-        // We ask Klyphic to download the track
-        const upstream = await axios.get(`${KLYPHIC}/music/soundclouddl`, {
-            params: { token: nextKey(), url },
-            responseType: 'stream',
+        const { data } = await axios.get(`${KLYPHIC}/music/soundcloudstream`, {
+            params: { token: nextKey(), url, format: 'mp3' },
             timeout: 30000,
         });
 
-        // We pipe the audio directly to the Android app
-        res.setHeader('Content-Type', 'audio/mpeg');
-        upstream.data.pipe(res);
+        // Extract the direct MP3 link from Klyphic's response
+        const audioUrl = data.audio_url || data.data?.audio_url || data.stream_url || data.data?.stream_url;
+
+        if (!audioUrl) {
+            console.log("Failed to find audio URL:", JSON.stringify(data).substring(0, 300));
+            return res.status(404).json({ error: "No audio URL found" });
+        }
+
+        // Redirect ExoPlayer directly to the MP3 file on SoundCloud's servers
+        res.redirect(audioUrl);
 
     } catch (e) { 
         console.error("STREAM ERROR:", e.message);
