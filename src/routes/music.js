@@ -1,118 +1,120 @@
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
 const { requireAuth } = require('../lib/authGuard');
+const supabase = require('../lib/supabase');
+const { JioSaavnClient } = require('jiosaavn-api-client');
 
-const KLYPHIC = 'https://apis.klyphic.in';
-const KEYS = [
-    process.env.KLYPHIC_KEY_1,
-    process.env.KLYPHIC_KEY_2,
-    process.env.KLYPHIC_KEY_3
-].filter(Boolean);
+// Initialize the JioSaavn client
+const jioClient = new JioSaavnClient();
 
-// Helper: Tries Key 1, then Key 2, then Key 3
-async function fetchWithFallback(endpoint, params) {
-    let lastError = null;
-    
-    for (let i = 0; i < KEYS.length; i++) {
-        try {
-            const token = KEYS[i];
-            const { data } = await axios.get(`${KLYPHIC}${endpoint}`, {
-                params: { ...params, token },
-                timeout: 20000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Accept': 'application/json, audio/mpeg, */*'
-                }
-            });
-            // If successful, return data immediately and stop trying other keys
-            return data; 
-        } catch (error) {
-            lastError = error;
-            const status = error.response?.status;
-            console.log(`Key ${i + 1} failed with status ${status}. Trying next key...`);
-            
-            // If it's a 401 (Unauthorized) or 429 (Rate Limit), continue to next key.
-            // If it's a 500 (Server Error), we still try the next key just in case.
-            if (i === KEYS.length - 1) {
-                console.error("All API keys exhausted.");
-            }
-        }
-    }
-    throw lastError || new Error("All API keys failed");
-}
-
-// 1. SEARCH: Try Spotify -> Fallback to SoundCloud
+// 1. SEARCH ROUTE (Using JioSaavn for full Indian catalog)
 router.get('/search', requireAuth, async (req, res) => {
-    const { query, limit = 15 } = req.query;
+    const query = String(req.query.query || '').trim();
     if (!query) return res.status(400).json({ error: 'query required' });
-    
+
     try {
-        console.log("Searching Spotify for:", query);
-        let data = null;
+        console.log('Searching JioSaavn for:', query);
         
-        try {
-            data = await fetchWithFallback('/search/spotify', { query, limit });
-        } catch (e) {
-            console.log("Spotify failed, falling back to SoundCloud");
-            data = await fetchWithFallback('/music/soundcloud', { query, limit });
+        // Search for songs on JioSaavn
+        const searchResult = await jioClient.searchSongs({
+            query: query,
+            limit: 15
+        });
+
+        if (!searchResult.success) {
+            throw new Error(searchResult.message || 'JioSaavn search failed');
         }
 
-        let tracks = data.results || data.data?.tracks || data.tracks || [];
-        
-        const formatted = tracks.map(t => ({
-            id: t.id || Math.random(),
-            title: t.title || t.name,
-            artist: t.artist || t.artists?.[0]?.name || "Unknown Artist",
-            thumbnail: t.thumbnail || t.album?.images?.[0]?.url || t.artwork_url,
-            permalink_url: `ytsearch:${t.title} ${t.artist || ''} audio`,
-            duration: t.duration || t.duration_ms || 0
+        // Map JioSaavn results to the format your Android app expects
+        const results = searchResult.data.results.map((song) => ({
+            id: song.id,
+            title: song.title,
+            artist: song.artistNames ? song.artistNames.join(', ') : 'Unknown Artist',
+            thumbnail: song.images?.[0]?.url || null,
+            // We store the JioSaavn song ID to fetch the stream later
+            permalink_url: `jiosaavn:${song.id}`,
+            duration: (song.durationSeconds || 0) * 1000
         }));
 
-        res.json({ ok: true, results: formatted });
-    } catch (e) {
-        res.status(502).json({ error: 'search failed', detail: e.message });
+        return res.json({ ok: true, results });
+    } catch (error) {
+        console.error('SEARCH ERROR:', error.message);
+        return res.status(502).json({ error: 'search failed', detail: error.message });
     }
 });
 
-// 2. STREAM: Resolve YouTube URL using the fallback logic
+// 2. STREAM ROUTE (Fetches the full 320kbps link from JioSaavn)
 router.get('/stream', async (req, res) => {
-    const { url, json } = req.query;
-    if (!url) return res.status(400).json({ error: 'url required' });
+    const source = String(req.query.url || '').trim();
+    if (!source) return res.status(400).json({ error: 'url required' });
 
     try {
-        console.log("Resolving stream for:", url);
-        let audioUrl = null;
-        let data = null;
+        let songId = null;
 
-        if (url.startsWith('ytsearch:') || url.includes('youtube.com') || url.includes('youtu.be')) {
-            const searchQuery = url.startsWith('ytsearch:') ? url.replace('ytsearch:', '') : url;
-            
-            // Use the fallback logic for YouTube
-            data = await fetchWithFallback('/downloader/yt', { 
-                query: url.startsWith('ytsearch:') ? searchQuery : undefined,
-                url: url.startsWith('ytsearch:') ? undefined : searchQuery,
-                format: 'mp3' 
-            });
-            audioUrl = data.download_url || data.data?.download_url || data.url;
+        // Extract the JioSaavn song ID from our custom permalink
+        if (source.startsWith('jiosaavn:')) {
+            songId = source.replace('jiosaavn:', '');
         } else {
-            // Use the fallback logic for SoundCloud
-            data = await fetchWithFallback('/music/soundclouddl', { url });
-            audioUrl = data.download_url || data.data?.download_url || data.url;
+            // Fallback: If it's a raw string, search for it (for legacy reasons)
+            const searchResult = await jioClient.searchSongs({ query: source, limit: 1 });
+            if (searchResult.success && searchResult.data.results.length > 0) {
+                songId = searchResult.data.results[0].id;
+            }
         }
 
-        if (!audioUrl) {
-            return res.status(404).json({ error: "No playable stream found" });
+        if (!songId) return res.status(404).json({ error: 'Track not found' });
+
+        console.log('Fetching full JioSaavn stream for ID:', songId);
+
+        // Get the full song details (which includes the decrypted download links)
+        const songDetails = await jioClient.getSongsById({ ids: [songId] });
+        
+        if (!songDetails.success || !songDetails.data[0]) {
+            return res.status(404).json({ error: 'Could not fetch song details' });
         }
 
-        if (json === 'true' || req.headers.accept?.includes('application/json')) {
-            return res.json({ ok: true, stream_url: audioUrl });
+        const song = songDetails.data[0];
+        
+        // Find the highest quality download link (320kbps)
+        // JioSaavn returns an array of links, usually sorted by quality.
+        let bestAudioUrl = null;
+        if (song.downloadLinks && song.downloadLinks.length > 0) {
+            // Sort by bitrate descending to get 320kbps
+            const sortedLinks = song.downloadLinks.sort((a, b) => b.bitrate - a.bitrate);
+            bestAudioUrl = sortedLinks[0].url;
         }
-        return res.redirect(audioUrl);
 
-    } catch (e) { 
-        console.error("STREAM ERROR:", e.message);
-        res.status(502).json({ error: 'stream failed', detail: e.message }); 
+        if (!bestAudioUrl) {
+            return res.status(404).json({ error: 'No playable stream URL found' });
+        }
+
+        console.log('Found JioSaavn MP3:', bestAudioUrl);
+        
+        if (req.query.json === 'true') {
+            return res.json({ ok: true, stream_url: bestAudioUrl });
+        }
+        return res.redirect(bestAudioUrl);
+
+    } catch (error) {
+        console.error('STREAM ERROR:', error.message);
+        return res.status(502).json({ error: 'stream failed', detail: error.message });
+    }
+});
+
+// 3. WEEKLY CATALOG (Keep this as is)
+router.get('/weekly', async (_req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('weekly_catalog')
+            .select('*')
+            .eq('is_active', true)
+            .order('created_at', { ascending: false })
+            .limit(10);
+
+        if (error) throw error;
+        return res.json({ ok: true, results: data });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
     }
 });
 
