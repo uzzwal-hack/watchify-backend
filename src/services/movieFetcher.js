@@ -3,7 +3,6 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-// Keywords to search for to fill categories
 const CATEGORY_SEARCHES = {
     'Bollywood': ['Bollywood', 'Hindi Movie', 'Dhurandhar', 'Jawan', 'Animal'],
     'Anime': ['Anime', 'Naruto', 'One Piece', 'Demon Slayer'],
@@ -17,19 +16,25 @@ async function fetchAndSaveMovies() {
     for (const [category, queries] of Object.entries(CATEGORY_SEARCHES)) {
         for (const query of queries) {
             try {
-                // Search MovieBox
                 const { data } = await axios.get(`${MOVIEBOX_API}/search`, {
                     params: { q: query },
                     timeout: 15000
                 });
 
                 const results = data?.results || [];
-                
-                // We only take the top 3 from each query to avoid duplicates
-                const topResults = results.slice(0, 3);
+                const topResults = results.slice(0, 4); // Fetch top 4 per query
 
                 for (const movie of topResults) {
-                    // Check if movie already exists in our DB by subject_id
+                    // 🚨 DURATION FILTER: Check if duration exists and is > 20 mins (1200 seconds)
+                    // Note: If MovieBox doesn't provide duration in search, this check might fail. 
+                    // We default to keeping it if duration is missing.
+                    const duration = movie.duration || 0; 
+                    if (duration > 0 && duration < 1200) {
+                        console.log(`[Auto-Fetcher] Skipping short video (${duration}s): ${movie.title}`);
+                        continue;
+                    }
+
+                    // Check if movie already exists in our DB
                     const { data: existing } = await supabase
                         .from('custom_movies')
                         .select('id')
@@ -37,16 +42,18 @@ async function fetchAndSaveMovies() {
                         .maybeSingle();
 
                     if (!existing) {
-                        // Insert the real movie into our database
+                        // Insert real movie into DB
                         await supabase.from('custom_movies').insert({
                             title: movie.title,
                             poster_url: movie.cover,
                             subject_id: movie.subject_id,
                             language: movie.language || 'Hindi',
                             genre: category,
+                            duration: duration,
                             is_auto_fetched: true,
-                            watch_url: null // Link will be fetched live when user clicks Play
+                            watch_url: null 
                         });
+                        console.log(`[Auto-Fetcher] Added: ${movie.title} (${category})`);
                     }
                 }
             } catch (err) {
