@@ -59,9 +59,15 @@ const media_catalog = {
     'K-Drama': [
         'Crash Landing on You', 'The Glory', 'All of Us Are Dead', 
         'Vincenzo', 'Goblin (Guardian)', 'Itaewon Class', 'Queen of Tears'
+    ],
+    // 🚨 NEW CATEGORY: STRICTLY HINDI MUSIC VIDEOS
+    'Music Videos': [
+        'Hindi Song', 'Bollywood Song', 'Hindi Lyrical Video', 
+        'Arijit Singh Song', 'Neha Kakkar Song', 'Pritam Song',
+        'Latest Hindi Song', 'Trending Bollywood Song'
     ]
 };
-
+    
 async function fetchAndSaveMovies() {
     console.log('[Auto-Fetcher] Starting massive catalog fetch...');
     
