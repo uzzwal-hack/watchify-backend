@@ -1,95 +1,90 @@
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
+const { requireAuth } = require('../lib/authGuard');
 const supabase = require('../lib/supabase');
-const { requireAuth, requireAdmin } = require('../lib/authGuard');
-const { canWatchMovie } = require('../lib/entitlements');
 
-const ALLOWED = [
-    'title','description','poster_url','banner_url','genre','duration',
-    'release_year','release_date','rating','status','is_preorder',
-    'watch_link','link_480p','link_720p','link_1080p','link_4k',
-    'director','writers','cast_members','characters','language','country',
-    'studio','external_ids','metadata_source','metadata_confidence',
-];
+const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-router.get('/:id/can-watch', requireAuth, async (req, res) => {
+// 1. HOME CATEGORIES (Fetched from your Supabase DB)
+router.get('/home', requireAuth, async (req, res) => {
     try {
-        const result = await canWatchMovie(
-            supabase,
-            req.user.id,
-            req.user.email,
-            req.params.id,
-        );
-        res.json(result);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+        // Fetch all auto-fetched and custom movies
+        const { data: movies } = await supabase
+            .from('custom_movies')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        // Group them by genre/category
+        const categorized = {
+            bollywood: movies?.filter(m => m.genre === 'Bollywood') || [],
+            anime: movies?.filter(m => m.genre === 'Anime') || [],
+            hollywood: movies?.filter(m => m.genre === 'Hollywood') || [],
+            romance: movies?.filter(m => m.genre === 'Romance') || [],
+            newMovies: movies?.slice(0, 10) || [] // Latest additions
+        };
+
+        res.json({ ok: true, data: categorized });
+    } catch (error) {
+        res.status(502).json({ error: 'Failed to load home', detail: error.message });
     }
 });
 
-router.post('/', requireAdmin, async (req, res) => {
-    const payload = req.body || {};
-    const clean = {};
-    for (const k of ALLOWED) if (k in payload) clean[k] = payload[k];
-    clean.created_by = req.admin.id;
-    clean.is_active = clean.status === 'PUBLISHED';
-    const { data, error } = await supabase.from('movies').insert(clean).select().single();
-    if (error) return res.status(500).json({ error: error.message });
-    await supabase.from('admin_activity_log').insert({
-        admin_id: req.admin.id, action: 'movie_created',
-        details_json: JSON.stringify({ movie_id: data.id, title: data.title, status: data.status }),
-    });
-    res.json({ movie: data });
+// 2. SEARCH MOVIES (Live from MovieBox + Custom DB)
+router.get('/search', requireAuth, async (req, res) => {
+    const { q } = req.query;
+    if (!q) return res.status(400).json({ error: 'query required' });
+
+    try {
+        // A. Search MovieBox
+        const [hiRes, enRes] = await Promise.all([
+            axios.get(`${MOVIEBOX_API}/search`, { params: { q: `${q} Hindi` }, timeout: 15000 }).catch(() => ({ data: { results: [] } })),
+            axios.get(`${MOVIEBOX_API}/search`, { params: { q }, timeout: 15000 }).catch(() => ({ data: { results: [] } }))
+        ]);
+        const allResults = [...(hiRes.data?.results || []), ...(enRes.data?.results || [])];
+        const uniqueMovieBox = Array.from(new Map(allResults.map(item => [item.subject_id, item])).values());
+
+        // B. Search Custom DB (Auto-fetched + Manual)
+        const { data: customMovies } = await supabase
+            .from('custom_movies')
+            .select('*')
+            .ilike('title', `%${q}%`);
+
+        const formattedCustom = (customMovies || []).map(m => ({
+            subject_id: m.subject_id || `custom_${m.id}`,
+            title: m.title,
+            cover: m.poster_url,
+            language: m.language,
+            is_custom: true
+        }));
+
+        res.json({ ok: true, data: [...formattedCustom, ...uniqueMovieBox] });
+    } catch (error) {
+        res.status(502).json({ error: 'Search failed', detail: error.message });
+    }
 });
 
-router.patch('/:id', requireAdmin, async (req, res) => {
-    const patch = { ...(req.body || {}) };
-    if ('status' in patch) patch.is_active = patch.status === 'PUBLISHED';
-    const { data, error } = await supabase.from('movies')
-        .update(patch).eq('id', req.params.id).select().single();
-    if (error) return res.status(500).json({ error: error.message });
-    await supabase.from('admin_activity_log').insert({
-        admin_id: req.admin.id, action: 'movie_edited',
-        details_json: JSON.stringify({ movie_id: data.id, fields: Object.keys(patch) }),
-    });
-    res.json({ movie: data });
-});
+// 3. GET STREAM LINK (Fetches fresh link from MovieBox if needed)
+router.get('/stream/:subjectId', requireAuth, async (req, res) => {
+    const { subjectId } = req.params;
 
-router.delete('/:id', requireAdmin, async (req, res) => {
-    const { error } = await supabase.from('movies').delete().eq('id', req.params.id);
-    if (error) return res.status(500).json({ error: error.message });
-    await supabase.from('admin_activity_log').insert({
-        admin_id: req.admin.id, action: 'movie_deleted',
-        details_json: JSON.stringify({ movie_id: req.params.id }),
-    });
-    res.json({ ok: true });
-});
+    try {
+        // If it's a manual custom movie (has a direct link)
+        if (subjectId.startsWith('custom_')) {
+            const dbId = subjectId.replace('custom_', '');
+            const { data: movie } = await supabase.from('custom_movies').select('watch_url').eq('id', dbId).single();
+            if (!movie || !movie.watch_url) throw new Error("Custom movie link not found");
+            return res.json({ ok: true, data: [{ url: movie.watch_url }] });
+        }
 
-router.post('/:id/download', async (req, res) => {
-    const { data: m } = await supabase.from('movies')
-        .select('download_count').eq('id', req.params.id).single();
-    const next = (m?.download_count || 0) + 1;
-    await supabase.from('movies').update({ download_count: next }).eq('id', req.params.id);
-    res.json({ ok: true, download_count: next });
+        // Otherwise, fetch a fresh link from MovieBox
+        console.log('Fetching fresh MovieBox stream for:', subjectId);
+        const { data } = await axios.get(`${MOVIEBOX_API}/Movie/api/stream/${subjectId}`, { timeout: 20000 });
+        res.json({ ok: true, data: data.data });
+
+    } catch (error) {
+        res.status(502).json({ error: 'Failed to fetch stream', detail: error.message });
+    }
 });
 
 module.exports = router;
-// 4. ADMIN: ADD CUSTOM MOVIE (Direct Link)
-router.post('/custom/add', requireAuth, async (req, res) => {
-    const { title, posterUrl, videoUrl, language, genre } = req.body;
-    
-    // Optional: Verify admin role here if you have a specific check
-    try {
-        const { data, error } = await supabase.from('custom_movies').insert({
-            title: title,
-            poster_url: posterUrl,
-            watch_url: videoUrl,
-            language: language || 'Hindi',
-            genre: genre || 'Action'
-        }).select().single();
-
-        if (error) throw error;
-        res.json({ ok: true, message: 'Custom movie added!', movie: data });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
