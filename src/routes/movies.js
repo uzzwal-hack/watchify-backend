@@ -6,13 +6,14 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-// 1. HOME CATEGORIES (All Categories)
+// ---------------------------------------------------------
+// 1. HOME CATEGORIES (Fetched from your Supabase DB)
+// ---------------------------------------------------------
 router.get('/home', requireAuth, async (req, res) => {
     try {
         const { data: movies } = await supabase
             .from('custom_movies')
             .select('*')
-            .eq('status', 'PUBLISHED') // Only show published movies
             .order('created_at', { ascending: false });
 
         const categorized = {
@@ -20,14 +21,7 @@ router.get('/home', requireAuth, async (req, res) => {
             hollywood: movies?.filter(m => m.genre === 'Hollywood') || [],
             anime: movies?.filter(m => m.genre === 'Anime') || [],
             south: movies?.filter(m => m.genre === 'South Movies') || [],
-            romance: movies?.filter(m => m.genre === 'Romance') || [],
-            teenage: movies?.filter(m => m.genre === 'Teenage Love') || [],
             webSeries: movies?.filter(m => m.genre === 'Web Series') || [],
-            sciFi: movies?.filter(m => m.genre === 'Sci-Fi') || [],
-            horror: movies?.filter(m => m.genre === 'Horror & Thriller') || [],
-            crime: movies?.filter(m => m.genre === 'Crime & Gangster') || [],
-            superhero: movies?.filter(m => m.genre === 'Superhero') || [],
-            kDrama: movies?.filter(m => m.genre === 'K-Drama') || [],
             musicVideos: movies?.filter(m => m.genre === 'Music Videos') || [],
             newMovies: movies?.slice(0, 10) || []
         };
@@ -38,12 +32,15 @@ router.get('/home', requireAuth, async (req, res) => {
     }
 });
 
+// ---------------------------------------------------------
 // 2. SEARCH MOVIES (Live from MovieBox + Custom DB)
+// ---------------------------------------------------------
 router.get('/search', requireAuth, async (req, res) => {
     const { q } = req.query;
     if (!q) return res.status(400).json({ error: 'query required' });
 
     try {
+        // Search MovieBox
         const [hiRes, enRes] = await Promise.all([
             axios.get(`${MOVIEBOX_API}/search`, { params: { q: `${q} Hindi` }, timeout: 15000 }).catch(() => ({ data: { results: [] } })),
             axios.get(`${MOVIEBOX_API}/search`, { params: { q }, timeout: 15000 }).catch(() => ({ data: { results: [] } }))
@@ -52,11 +49,11 @@ router.get('/search', requireAuth, async (req, res) => {
         const allResults = [...(hiRes.data?.results || []), ...(enRes.data?.results || [])];
         const uniqueMovieBox = Array.from(new Map(allResults.map(item => [item.subject_id, item])).values());
 
+        // Search Custom DB
         const { data: customMovies } = await supabase
             .from('custom_movies')
             .select('*')
-            .ilike('title', `%${q}%`)
-            .eq('status', 'PUBLISHED');
+            .ilike('title', `%${q}%`);
 
         const formattedCustom = (customMovies || []).map(m => ({
             subject_id: m.subject_id || `custom_${m.id}`,
@@ -72,7 +69,9 @@ router.get('/search', requireAuth, async (req, res) => {
     }
 });
 
-// 3. GET STREAM LINK
+// ---------------------------------------------------------
+// 3. GET STREAM LINK (Fetches fresh link from MovieBox)
+// ---------------------------------------------------------
 router.get('/stream/:subjectId', requireAuth, async (req, res) => {
     const { subjectId } = req.params;
 
@@ -93,7 +92,9 @@ router.get('/stream/:subjectId', requireAuth, async (req, res) => {
     }
 });
 
-// 4. ADMIN: ADD CUSTOM MOVIE
+// ---------------------------------------------------------
+// 4. ADMIN: ADD CUSTOM MOVIE (Direct Link)
+// ---------------------------------------------------------
 router.post('/custom/add', requireAuth, async (req, res) => {
     const { title, posterUrl, videoUrl, language, genre } = req.body;
     
@@ -103,8 +104,7 @@ router.post('/custom/add', requireAuth, async (req, res) => {
             poster_url: posterUrl,
             watch_url: videoUrl,
             language: language || 'Hindi',
-            genre: genre || 'Action',
-            status: 'PUBLISHED'
+            genre: genre || 'Action'
         }).select().single();
 
         if (error) throw error;
@@ -114,7 +114,9 @@ router.post('/custom/add', requireAuth, async (req, res) => {
     }
 });
 
-// 5. AUTO-REFRESHER (Keeps links alive)
+// ---------------------------------------------------------
+// 5. AUTO-REFRESHER (Runs safely in background)
+// ---------------------------------------------------------
 async function autoHealLinks() {
     console.log('[Auto-Refresher] Starting...');
     try {
@@ -139,14 +141,11 @@ async function autoHealLinks() {
                 }
             } catch (err) {
                 if (err.response?.status === 404) {
-                    // Mark as unavailable if MovieBox deleted it
                     await supabase.from('custom_movies').update({ status: 'UNAVAILABLE' }).eq('id', movie.id);
-                    console.log(`[Auto-Refresher] Marked ${movie.id} as UNAVAILABLE (404)`);
                 } else {
                     console.error(`[Auto-Refresher] Failed ${movie.id}:`, err.message);
                 }
             }
-            // Wait 500ms to prevent rate limiting
             await new Promise(resolve => setTimeout(resolve, 500));
         }
     } catch (error) {
