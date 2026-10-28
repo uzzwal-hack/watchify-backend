@@ -3,15 +3,17 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
+// We add a new search category for Music Videos / Lyrics
 const CATEGORY_SEARCHES = {
-    'Bollywood': ['Bollywood', 'Hindi Movie', 'Dhurandhar', 'Jawan', 'Animal'],
-    'Anime': ['Anime', 'Naruto', 'One Piece', 'Demon Slayer'],
-    'Hollywood': ['Hollywood', 'Marvel', 'Avatar', 'Deadpool'],
-    'Romance': ['Romance', 'Love Story', 'Romantic Movie']
+    'Bollywood': ['Bollywood', 'Hindi Movie', 'Dhurandhar', 'Jawan'],
+    'Anime': ['Anime', 'Naruto', 'One Piece'],
+    'Hollywood': ['Hollywood', 'Marvel', 'Avatar'],
+    'Romance': ['Romance', 'Romantic Movie'],
+    'Music Videos': ['Lyrical Video', 'Song', 'Music Video'] // NEW CATEGORY
 };
 
 async function fetchAndSaveMovies() {
-    console.log('[Auto-Fetcher] Starting movie fetch from MovieBox...');
+    console.log('[Auto-Fetcher] Starting fetch...');
     
     for (const [category, queries] of Object.entries(CATEGORY_SEARCHES)) {
         for (const query of queries) {
@@ -22,19 +24,19 @@ async function fetchAndSaveMovies() {
                 });
 
                 const results = data?.results || [];
-                const topResults = results.slice(0, 4); // Fetch top 4 per query
-
-                for (const movie of topResults) {
-                    // 🚨 DURATION FILTER: Check if duration exists and is > 20 mins (1200 seconds)
-                    // Note: If MovieBox doesn't provide duration in search, this check might fail. 
-                    // We default to keeping it if duration is missing.
-                    const duration = movie.duration || 0; 
-                    if (duration > 0 && duration < 1200) {
-                        console.log(`[Auto-Fetcher] Skipping short video (${duration}s): ${movie.title}`);
-                        continue;
+                
+                for (const movie of results) {
+                    const duration = movie.duration || 0;
+                    
+                    // 🚨 DURATION LOGIC
+                    if (category === 'Music Videos') {
+                        // Music videos should be SHORT (less than 20 mins)
+                        if (duration > 1200) continue; 
+                    } else {
+                        // Movies should be LONG (more than 20 mins)
+                        if (duration > 0 && duration < 1200) continue;
                     }
 
-                    // Check if movie already exists in our DB
                     const { data: existing } = await supabase
                         .from('custom_movies')
                         .select('id')
@@ -42,7 +44,6 @@ async function fetchAndSaveMovies() {
                         .maybeSingle();
 
                     if (!existing) {
-                        // Insert real movie into DB
                         await supabase.from('custom_movies').insert({
                             title: movie.title,
                             poster_url: movie.cover,
@@ -57,11 +58,10 @@ async function fetchAndSaveMovies() {
                     }
                 }
             } catch (err) {
-                console.error(`[Auto-Fetcher] Failed to fetch ${query}:`, err.message);
+                console.error(`[Auto-Fetcher] Failed for ${query}:`, err.message);
             }
         }
     }
-    console.log('[Auto-Fetcher] Finished fetching movies.');
 }
 
 module.exports = { fetchAndSaveMovies };
