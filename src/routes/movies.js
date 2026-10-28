@@ -9,19 +9,21 @@ const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 // 1. HOME CATEGORIES (Fetched from your Supabase DB)
 router.get('/home', requireAuth, async (req, res) => {
     try {
-        // Fetch all auto-fetched and custom movies
+        // Only fetch movies > 20 mins (1200 sec)
         const { data: movies } = await supabase
             .from('custom_movies')
             .select('*')
             .order('created_at', { ascending: false });
 
-        // Group them by genre/category
+        // Filter out short videos just in case
+        const validMovies = movies?.filter(m => m.duration === 0 || m.duration > 1200) || [];
+
         const categorized = {
-            bollywood: movies?.filter(m => m.genre === 'Bollywood') || [],
-            anime: movies?.filter(m => m.genre === 'Anime') || [],
-            hollywood: movies?.filter(m => m.genre === 'Hollywood') || [],
-            romance: movies?.filter(m => m.genre === 'Romance') || [],
-            newMovies: movies?.slice(0, 10) || [] // Latest additions
+            bollywood: validMovies.filter(m => m.genre === 'Bollywood'),
+            anime: validMovies.filter(m => m.genre === 'Anime'),
+            hollywood: validMovies.filter(m => m.genre === 'Hollywood'),
+            romance: validMovies.filter(m => m.genre === 'Romance'),
+            newMovies: validMovies.slice(0, 10)
         };
 
         res.json({ ok: true, data: categorized });
@@ -30,46 +32,37 @@ router.get('/home', requireAuth, async (req, res) => {
     }
 });
 
-// 2. SEARCH MOVIES (Live from MovieBox + Custom DB)
+// 2. SEARCH MOVIES (Live)
 router.get('/search', requireAuth, async (req, res) => {
     const { q } = req.query;
     if (!q) return res.status(400).json({ error: 'query required' });
 
     try {
-        // A. Search MovieBox
         const [hiRes, enRes] = await Promise.all([
             axios.get(`${MOVIEBOX_API}/search`, { params: { q: `${q} Hindi` }, timeout: 15000 }).catch(() => ({ data: { results: [] } })),
             axios.get(`${MOVIEBOX_API}/search`, { params: { q }, timeout: 15000 }).catch(() => ({ data: { results: [] } }))
         ]);
+        
         const allResults = [...(hiRes.data?.results || []), ...(enRes.data?.results || [])];
-        const uniqueMovieBox = Array.from(new Map(allResults.map(item => [item.subject_id, item])).values());
+        
+        // Filter out videos < 20 mins
+        const filteredResults = allResults.filter(m => {
+            const duration = m.duration || 0;
+            return duration === 0 || duration > 1200; 
+        });
 
-        // B. Search Custom DB (Auto-fetched + Manual)
-        const { data: customMovies } = await supabase
-            .from('custom_movies')
-            .select('*')
-            .ilike('title', `%${q}%`);
+        const uniqueMovieBox = Array.from(new Map(filteredResults.map(item => [item.subject_id, item])).values());
 
-        const formattedCustom = (customMovies || []).map(m => ({
-            subject_id: m.subject_id || `custom_${m.id}`,
-            title: m.title,
-            cover: m.poster_url,
-            language: m.language,
-            is_custom: true
-        }));
-
-        res.json({ ok: true, data: [...formattedCustom, ...uniqueMovieBox] });
+        res.json({ ok: true, data: uniqueMovieBox });
     } catch (error) {
         res.status(502).json({ error: 'Search failed', detail: error.message });
     }
 });
 
-// 3. GET STREAM LINK (Fetches fresh link from MovieBox if needed)
+// 3. GET STREAM LINK
 router.get('/stream/:subjectId', requireAuth, async (req, res) => {
     const { subjectId } = req.params;
-
     try {
-        // If it's a manual custom movie (has a direct link)
         if (subjectId.startsWith('custom_')) {
             const dbId = subjectId.replace('custom_', '');
             const { data: movie } = await supabase.from('custom_movies').select('watch_url').eq('id', dbId).single();
@@ -77,8 +70,6 @@ router.get('/stream/:subjectId', requireAuth, async (req, res) => {
             return res.json({ ok: true, data: [{ url: movie.watch_url }] });
         }
 
-        // Otherwise, fetch a fresh link from MovieBox
-        console.log('Fetching fresh MovieBox stream for:', subjectId);
         const { data } = await axios.get(`${MOVIEBOX_API}/Movie/api/stream/${subjectId}`, { timeout: 20000 });
         res.json({ ok: true, data: data.data });
 
