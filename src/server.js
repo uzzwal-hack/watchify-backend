@@ -3,6 +3,7 @@ const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const { fetchAndSaveMovies } = require('./services/movieFetcher');
 
 const app = express();
 
@@ -15,7 +16,7 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', (_req, res) => res.json({ ok: true, t: Date.now() }));
 
-// Load ONLY the routes we are actually using
+// Load Routes
 app.use('/api/home',         rateLimit({ windowMs: 60_000, max: 60 }),  require('./routes/home'));
 app.use('/api/chat',         rateLimit({ windowMs: 60_000, max: 120 }), require('./routes/chat'));
 app.use('/api/music',        rateLimit({ windowMs: 60_000, max: 60 }),  require('./routes/music'));
@@ -26,4 +27,14 @@ app.use('/api/support',      rateLimit({ windowMs: 60_000, max: 60 }),  require(
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log(`Watchify backend on :${port}`);
+    
+    // Start the auto-fetcher
+    console.log('[Server] Starting movie auto-fetcher...');
+    fetchAndSaveMovies();
+    
+    // Run every 6 hours
+    setInterval(() => {
+        console.log('[Server] Running scheduled movie fetch...');
+        fetchAndSaveMovies();
+    }, 6 * 60 * 60 * 1000);
 });
