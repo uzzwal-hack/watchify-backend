@@ -6,9 +6,7 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-// ---------------------------------------------------------
-// 1. HOME CATEGORIES (Fetched from your Supabase DB)
-// ---------------------------------------------------------
+// 1. HOME CATEGORIES (Loads from Supabase)
 router.get('/home', requireAuth, async (req, res) => {
     try {
         const { data: movies } = await supabase
@@ -32,15 +30,13 @@ router.get('/home', requireAuth, async (req, res) => {
     }
 });
 
-// ---------------------------------------------------------
-// 2. SEARCH MOVIES (Live from MovieBox + Custom DB)
-// ---------------------------------------------------------
+// 2. LIVE SEARCH (Searches MovieBox AND saves to DB for categories)
 router.get('/search', requireAuth, async (req, res) => {
     const { q } = req.query;
     if (!q) return res.status(400).json({ error: 'query required' });
 
     try {
-        // Search MovieBox
+        // Fetch from MovieBox
         const [hiRes, enRes] = await Promise.all([
             axios.get(`${MOVIEBOX_API}/search`, { params: { q: `${q} Hindi` }, timeout: 15000 }).catch(() => ({ data: { results: [] } })),
             axios.get(`${MOVIEBOX_API}/search`, { params: { q }, timeout: 15000 }).catch(() => ({ data: { results: [] } }))
@@ -49,114 +45,56 @@ router.get('/search', requireAuth, async (req, res) => {
         const allResults = [...(hiRes.data?.results || []), ...(enRes.data?.results || [])];
         const uniqueMovieBox = Array.from(new Map(allResults.map(item => [item.subject_id, item])).values());
 
-        // Search Custom DB
-        const { data: customMovies } = await supabase
-            .from('custom_movies')
-            .select('*')
-            .ilike('title', `%${q}%`);
+        // 🚨 AUTO-SAVE TO SUPABASE
+        // We save the top 5 results to the database under "Web Series" or "Bollywood" 
+        // so they show up in categories next time.
+        for (const movie of uniqueMovieBox.slice(0, 5)) {
+            const { data: existing } = await supabase
+                .from('custom_movies')
+                .select('id')
+                .eq('subject_id', movie.subject_id)
+                .maybeSingle();
 
-        const formattedCustom = (customMovies || []).map(m => ({
-            subject_id: m.subject_id || `custom_${m.id}`,
-            title: m.title,
-            cover: m.poster_url,
-            language: m.language,
-            is_custom: true
-        }));
+            if (!existing) {
+                // Determine category based on language
+                const isHindi = movie.language?.toLowerCase().includes('hindi') || q.toLowerCase().includes('hindi');
+                const genre = isHindi ? 'Bollywood' : 'Web Series';
 
-        res.json({ ok: true, data: [...formattedCustom, ...uniqueMovieBox] });
+                await supabase.from('custom_movies').insert({
+                    title: movie.title,
+                    poster_url: movie.cover,
+                    subject_id: movie.subject_id,
+                    language: movie.language || 'Hindi',
+                    genre: genre,
+                    status: 'PUBLISHED',
+                    watch_url: null
+                });
+            }
+        }
+
+        res.json({ ok: true, data: uniqueMovieBox });
     } catch (error) {
         res.status(502).json({ error: 'Search failed', detail: error.message });
     }
 });
 
-// ---------------------------------------------------------
-// 3. GET STREAM LINK (Fetches fresh link from MovieBox)
-// ---------------------------------------------------------
+// 3. GET STREAM LINK (Fetches fresh link live)
 router.get('/stream/:subjectId', requireAuth, async (req, res) => {
     const { subjectId } = req.params;
-
     try {
-        if (subjectId.startsWith('custom_')) {
-            const dbId = subjectId.replace('custom_', '');
-            const { data: movie } = await supabase.from('custom_movies').select('watch_url').eq('id', dbId).single();
-            if (!movie || !movie.watch_url) throw new Error("Custom movie link not found");
-            return res.json({ ok: true, data: [{ url: movie.watch_url }] });
-        }
-
-        console.log('Fetching fresh MovieBox stream for:', subjectId);
+        console.log('Fetching fresh link for:', subjectId);
         const { data } = await axios.get(`${MOVIEBOX_API}/Movie/api/stream/${subjectId}`, { timeout: 20000 });
-        res.json({ ok: true, data: data.data });
+        
+        // Update the DB with the fresh link silently
+        await supabase.from('custom_movies').update({ 
+            watch_url: data?.data?.[0]?.url,
+            last_updated: new Date().toISOString()
+        }).eq('subject_id', subjectId);
 
+        res.json({ ok: true, data: data.data });
     } catch (error) {
         res.status(502).json({ error: 'Failed to fetch stream', detail: error.message });
     }
 });
-
-// ---------------------------------------------------------
-// 4. ADMIN: ADD CUSTOM MOVIE (Direct Link)
-// ---------------------------------------------------------
-router.post('/custom/add', requireAuth, async (req, res) => {
-    const { title, posterUrl, videoUrl, language, genre } = req.body;
-    
-    try {
-        const { data, error } = await supabase.from('custom_movies').insert({
-            title: title,
-            poster_url: posterUrl,
-            watch_url: videoUrl,
-            language: language || 'Hindi',
-            genre: genre || 'Action'
-        }).select().single();
-
-        if (error) throw error;
-        res.json({ ok: true, message: 'Custom movie added!', movie: data });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ---------------------------------------------------------
-// 5. AUTO-REFRESHER (Runs safely in background)
-// ---------------------------------------------------------
-async function autoHealLinks() {
-    console.log('[Auto-Refresher] Starting...');
-    try {
-        const { data: movies } = await supabase
-            .from('custom_movies')
-            .select('id, subject_id, watch_url, last_updated')
-            .eq('status', 'PUBLISHED');
-
-        for (const movie of movies || []) {
-            if (!movie.subject_id || movie.subject_id.startsWith('custom_')) continue;
-            
-            try {
-                const { data } = await axios.get(`${MOVIEBOX_API}/Movie/api/stream/${movie.subject_id}`, { timeout: 20000 });
-                const links = data?.data || [];
-                const bestLink = links.find(l => l.resolution === 720) || links[0];
-
-                if (bestLink && bestLink.url) {
-                    await supabase.from('custom_movies').update({
-                        watch_url: bestLink.url,
-                        last_updated: new Date().toISOString()
-                    }).eq('id', movie.id);
-                }
-            } catch (err) {
-                if (err.response?.status === 404) {
-                    await supabase.from('custom_movies').update({ status: 'UNAVAILABLE' }).eq('id', movie.id);
-                } else {
-                    console.error(`[Auto-Refresher] Failed ${movie.id}:`, err.message);
-                }
-            }
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-    } catch (error) {
-        console.error('Auto-Refresher Error:', error);
-    }
-    console.log('[Auto-Refresher] Finished.');
-}
-
-// Run on start
-autoHealLinks();
-// Run every 1 hour
-setInterval(autoHealLinks, 60 * 60 * 1000);
 
 module.exports = router;
