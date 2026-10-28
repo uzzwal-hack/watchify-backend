@@ -73,3 +73,23 @@ router.post('/:id/download', async (req, res) => {
 });
 
 module.exports = router;
+// 4. ADMIN: ADD CUSTOM MOVIE (Direct Link)
+router.post('/custom/add', requireAuth, async (req, res) => {
+    const { title, posterUrl, videoUrl, language, genre } = req.body;
+    
+    // Optional: Verify admin role here if you have a specific check
+    try {
+        const { data, error } = await supabase.from('custom_movies').insert({
+            title: title,
+            poster_url: posterUrl,
+            watch_url: videoUrl,
+            language: language || 'Hindi',
+            genre: genre || 'Action'
+        }).select().single();
+
+        if (error) throw error;
+        res.json({ ok: true, message: 'Custom movie added!', movie: data });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
