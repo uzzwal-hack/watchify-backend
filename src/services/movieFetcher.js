@@ -3,19 +3,69 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-// We add a new search category for Music Videos / Lyrics
-const CATEGORY_SEARCHES = {
-    'Bollywood': ['Bollywood', 'Hindi Movie', 'Dhurandhar', 'Jawan'],
-    'Anime': ['Anime', 'Naruto', 'One Piece'],
-    'Hollywood': ['Hollywood', 'Marvel', 'Avatar'],
-    'Romance': ['Romance', 'Romantic Movie'],
-    'Music Videos': ['Lyrical Video', 'Song', 'Music Video'] // NEW CATEGORY
+// The massive catalog you provided
+const media_catalog = {
+    'Bollywood': [
+        'Jawan', 'Animal', 'Pathaan', 'Dunki', 'Dangal', 
+        '3 Idiots', 'Dhurandhar', 'Stree 2', 'Bajrangi Bhaijaan', 
+        'Secret Superstar', 'Gadar 2', 'PK', 'Sanju'
+    ],
+    'Hollywood': [
+        'Avatar', 'Deadpool', 'Inception', 'Interstellar', 'The Batman', 
+        'Oppenheimer', 'Avengers: Endgame', 'Titanic', 'Avatar: The Way of Water', 
+        'Star Wars: The Force Awakens', 'Jurassic World', 'Top Gun: Maverick'
+    ],
+    'Anime': [
+        'Naruto', 'One Piece', 'Demon Slayer', 'Jujutsu Kaisen', 'Attack on Titan',
+        'Spirited Away', 'Your Name', 'Suzume', 'Dragon Ball Super: Broly', 
+        'Death Note', 'Bleach'
+    ],
+    'South Movies': [
+        'RRR', 'KGF', 'Pushpa', 'Baahubali', 'Kantara',
+        'Kalki 2898 AD', 'Baahubali 2: The Conclusion', 'KGF: Chapter 2', 
+        'Salaar: Part 1 – Ceasefire', 'Jailer', 'Leo', 'Vikram'
+    ],
+    'Romance': [
+        'Titanic', 'The Notebook', 'La La Land', 'Fifty Shades', 'After',
+        'Me Before You', 'Pride & Prejudice', 'A Star Is Born', 
+        'Crazy Rich Asians', 'Before Sunrise', 'Fault in Our Stars'
+    ],
+    'Teenage Love': [
+        'To All the Boys', 'The Kissing Booth', 'The Summer I Turned Pretty', 'XO Kitty',
+        'Heartstopper', 'Never Have I Ever', 'Love, Simon', 
+        '10 Things I Hate About You', 'The Fault in Our Stars', 'Sex Education'
+    ],
+    'Web Series': [
+        'Money Heist', 'Squid Game', 'Stranger Things', 'Breaking Bad', 'Wednesday',
+        'Game of Thrones', 'The Last of Us', 'The Boys', 'Chernobyl', 
+        'Dark', 'Succession'
+    ],
+    'Sci-Fi': [
+        'Interstellar', 'Inception', 'Dune: Part Two', 'The Matrix', 
+        'Blade Runner 2049', 'Black Mirror', 'Dark', 'Severance'
+    ],
+    'Horror & Thriller': [
+        'It', 'The Conjuring', 'A Quiet Place', 'Get Out', 
+        'Hereditary', 'The Haunting of Hill House', 'Shutter Island', 'Gone Girl'
+    ],
+    'Crime & Gangster': [
+        'The Godfather', 'Goodfellas', 'Scarface', 'Pulp Fiction', 
+        'Peaky Blinders', 'Narcos', 'Mirzapur', 'Sacred Games', 'The Sopranos'
+    ],
+    'Superhero': [
+        'Avengers: Endgame', 'Spider-Man: No Way Home', 'The Dark Knight', 
+        'Deadpool & Wolverine', 'Black Panther', 'The Boys', 'Invincible', 'Daredevil'
+    ],
+    'K-Drama': [
+        'Crash Landing on You', 'The Glory', 'All of Us Are Dead', 
+        'Vincenzo', 'Goblin (Guardian)', 'Itaewon Class', 'Queen of Tears'
+    ]
 };
 
 async function fetchAndSaveMovies() {
-    console.log('[Auto-Fetcher] Starting fetch...');
+    console.log('[Auto-Fetcher] Starting massive catalog fetch...');
     
-    for (const [category, queries] of Object.entries(CATEGORY_SEARCHES)) {
+    for (const [category, queries] of Object.entries(media_catalog)) {
         for (const query of queries) {
             try {
                 const { data } = await axios.get(`${MOVIEBOX_API}/search`, {
@@ -25,18 +75,8 @@ async function fetchAndSaveMovies() {
 
                 const results = data?.results || [];
                 
-                for (const movie of results) {
-                    const duration = movie.duration || 0;
-                    
-                    // 🚨 DURATION LOGIC
-                    if (category === 'Music Videos') {
-                        // Music videos should be SHORT (less than 20 mins)
-                        if (duration > 1200) continue; 
-                    } else {
-                        // Movies should be LONG (more than 20 mins)
-                        if (duration > 0 && duration < 1200) continue;
-                    }
-
+                // Take the top 2 results for each specific movie to avoid duplicates
+                for (const movie of results.slice(0, 2)) {
                     const { data: existing } = await supabase
                         .from('custom_movies')
                         .select('id')
@@ -49,12 +89,10 @@ async function fetchAndSaveMovies() {
                             poster_url: movie.cover,
                             subject_id: movie.subject_id,
                             language: movie.language || 'Hindi',
-                            genre: category,
-                            duration: duration,
+                            genre: category, // Saves as 'K-Drama', 'Sci-Fi', etc.
                             is_auto_fetched: true,
                             watch_url: null 
                         });
-                        console.log(`[Auto-Fetcher] Added: ${movie.title} (${category})`);
                     }
                 }
             } catch (err) {
@@ -62,6 +100,7 @@ async function fetchAndSaveMovies() {
             }
         }
     }
+    console.log('[Auto-Fetcher] Finished fetching massive catalog.');
 }
 
 module.exports = { fetchAndSaveMovies };
