@@ -3,7 +3,6 @@ const supabase = require('../lib/supabase');
 
 const MOVIEBOX_API = 'https://movieboxapi-v2ne.onrender.com';
 
-// The massive catalog you provided
 const media_catalog = {
     'Bollywood': [
         'Jawan', 'Animal', 'Pathaan', 'Dunki', 'Dangal', 
@@ -60,7 +59,6 @@ const media_catalog = {
         'Crash Landing on You', 'The Glory', 'All of Us Are Dead', 
         'Vincenzo', 'Goblin (Guardian)', 'Itaewon Class', 'Queen of Tears'
     ],
-    // 🚨 NEW CATEGORY: STRICTLY HINDI MUSIC VIDEOS
     'Music Videos': [
         'Hindi Song', 'Bollywood Song', 'Hindi Lyrical Video', 
         'Arijit Singh Song', 'Neha Kakkar Song', 'Pritam Song',
@@ -69,7 +67,7 @@ const media_catalog = {
 };
     
 async function fetchAndSaveMovies() {
-    console.log('[Auto-Fetcher] Starting massive catalog fetch...');
+    console.log('[Auto-Fetcher] Starting strict catalog fetch...');
     
     for (const [category, queries] of Object.entries(media_catalog)) {
         for (const query of queries) {
@@ -80,9 +78,28 @@ async function fetchAndSaveMovies() {
                 });
 
                 const results = data?.results || [];
-                
-                // Take the top 2 results for each specific movie to avoid duplicates
-                for (const movie of results.slice(0, 2)) {
+
+                // Loop through the top 5 results
+                for (const movie of results.slice(0, 5)) {
+                    
+                    // 🚨 STRICT MATCHING
+                    const searchLower = query.toLowerCase();
+                    const titleLower = movie.title.toLowerCase();
+                    
+                    // Skip if the title doesn't match what we searched for
+                    if (!titleLower.includes(searchLower) && !searchLower.includes(titleLower)) {
+                        continue; 
+                    }
+
+                    // 🚨 DURATION FILTER
+                    const duration = movie.duration || 0;
+                    if (category === 'Music Videos') {
+                        if (duration > 1200) continue; // Must be < 20 mins
+                    } else {
+                        if (duration > 0 && duration < 1200) continue; // Must be > 20 mins
+                    } 
+
+                    // 🚨 SAVE TO DATABASE
                     const { data: existing } = await supabase
                         .from('custom_movies')
                         .select('id')
@@ -94,11 +111,12 @@ async function fetchAndSaveMovies() {
                             title: movie.title,
                             poster_url: movie.cover,
                             subject_id: movie.subject_id,
-                            language: movie.language || 'Hindi',
-                            genre: category, // Saves as 'K-Drama', 'Sci-Fi', etc.
+                            language: 'Hindi', // Force Hindi as requested
+                            genre: category, 
                             is_auto_fetched: true,
                             watch_url: null 
                         });
+                        console.log(`[Saved] ${movie.title} (${category})`);
                     }
                 }
             } catch (err) {
